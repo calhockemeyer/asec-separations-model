@@ -82,6 +82,48 @@ asec.head()
 
 ## Transform data to prepare for modeling
 
+### Get price data from BLS
+
+We need to account for inflation to make incomes comparable across years.
+
+```{python}
+import json
+
+BLS_CPI_SERIES = 'CUUR0000SA0'  # CPI-U
+
+# Get CPI data from BLS API 
+headers = {'Content-type': 'application/json'}
+data = json.dumps({"seriesid": [BLS_CPI_SERIES],
+                   "startyear": str(start_year - 1), 
+                   "endyear": str(base_year-  1)})
+p = requests.post('https://api.bls.gov/publicAPI/v2/timeseries/data/', 
+                  data=data, headers=headers)
+json_data = json.loads(p.text)
+
+# put CPI data into dataframe and calculate inflation rates
+cpi = pd.DataFrame(json_data['Results']['series'][0]['data'])
+cpi = cpi[cpi.period == 'M12']  # only keep end of year numbers
+cpi = cpi[['year', 'value']]
+cpi.year = cpi.year.astype(np.int64)
+cpi.value = cpi.value.astype(np.float64)
+cpi = cpi.sort_values('year', ascending=False).reset_index(drop=True)
+cpi['inflation'] = cpi.value / cpi.value.shift(-1) - 1
+cpi
+
+```
+
+Inflation numbers look accurate. Let's Cacluate price level ratios indexed to 2023 prices now. The years will be shifted by one, because incomes in each year of ASEC data correspond to the previous year's income:
+
+```{python}
+cpi_2023 = cpi[cpi.year == 2023].value.iloc[0]
+cpi['pl_ratio'] = cpi_2023 / cpi.value
+cpi['year'] = cpi['year'] + 1
+cpi
+```
+
+
+### Clean ASEC data
+
 ```{python}
 def remove_rows(df):
     df = df.copy()
@@ -172,13 +214,22 @@ def get_children_var(df):
     
     return df
 
-# ! need to adjust for inflation
-def get_log_income_var(df):
+def get_log_income_var(df, cpi):
     df = df.copy()
+    cpi = cpi.copy()
+    
+    # adjust incomes to price level
+    df = df.merge(cpi[['year', 'pl_ratio']], on='year')
+    df['income_adjusted'] = df.htotval * df.pl_ratio
+    
     # initially set to 0
     df['log_income'] = 0.0
     # only assign log value to positive values - we will treat negative and 0 income as all having 0 here
-    df.loc[df.htotval > 0, 'log_income'] = np.log(df[df.htotval > 0].htotval)
+    df.loc[df.income_adjusted > 0, 'log_income'] = \
+        np.log(df[df.income_adjusted > 0].income_adjusted)
+        
+    # remove cpi column
+    df = df.drop('pl_ratio', axis=1)
     
     return df
 
@@ -201,7 +252,7 @@ asec = get_pt_var(asec)
 asec = get_disability_var(asec)
 asec = get_married_var(asec)
 asec = get_children_var(asec)
-asec = get_log_income_var(asec)
+asec = get_log_income_var(asec, cpi)
 asec = get_leaver_var(asec)
 
 print('Percentage workers who are classified as leavers', 
@@ -295,6 +346,79 @@ explained_variance_ratio = pca.explained_variance_ratio_
 importance_rank = np.argsort(explained_variance_ratio)[::-1]
 
 # Print the ranked variables
+pca_importance = []
 for i, var_index in enumerate(importance_rank[:10]):
+    pca_importance.append(X.columns[var_index])
     print(f"Rank {i+1}: Variable {X.columns[var_index]}")
+```
+
+### Random Forest
+
+Let's implement a random forest model to gather more insights about our data.
+
+Note that our data is imbalanced. We should use balanced class weights to mitigate this:
+
+```{python}
+leavers_frac = y.sum()/len(y)
+leavers_frac_pct = round(leavers_frac*100, 1)
+
+print(f"{leavers_frac_pct}% of the rows in our sample have a leaver value of 1")
+```
+
+```{python}
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+
+rf = RandomForestClassifier(n_estimators=100,
+                            class_weight='balanced',
+                            random_state=42)
+rf.fit(X_train, y_train)
+
+y_pred = rf.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print("Accuracy:", accuracy)
+```
+
+Even when using the balanced class weights, our model predicts a low amount of leavers:
+
+```{python}
+pred_leavers_frac = y_pred.sum()/len(y_pred)
+pred_leavers_frac_pct = round(pred_leavers_frac*100, 1)
+
+print(f"{pred_leavers_frac_pct}% of training data was predicted to be leavers by the model")
+```
+
+Let's make a confusion matrix and compute some metrics:
+```{python}
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import precision_score, recall_score, f1_score
+
+cm = confusion_matrix(y_test, y_pred)
+ConfusionMatrixDisplay(cm).plot()
+
+print('Recall:', recall_score(y_test, y_pred))
+print('Precision:', precision_score(y_test, y_pred))
+print('F1:', f1_score(y_test, y_pred))
+```  
+
+Precision is quite high, meaning that the vast majority of positive predictions were correct. Recall was just over 50%, which means the model was only able to identify classify a little over half of the leavers. Given the imbalance in the data, this isn't terrible
+
+Let's see which features this random forest assessed as most important. Just like we saw in PCA, income and age are the most important features, but this time income is ranked higher than age. Unlike what we saw in PCA, an industry and 5 occupations were among the most important features in this model.
+
+```{python}
+print(pd.Series(rf.feature_importances_, index=X.columns) \
+    .sort_values(ascending=False)[:10])
+```
+
+Let's start adding these importance rankings to a DataFrame we can use to compare the rankings from different models:
+
+```{python}
+importance_rankings = pd.DataFrame({
+    'Rank': list(range(1,11)),
+    'PCA': pca_importance,
+    'Random Forest': list(
+        pd.Series(rf.feature_importances_, index=X.columns) \
+        .sort_values(ascending=False)[:10].index),
+})
+importance_rankings
 ```
