@@ -346,6 +346,79 @@ explained_variance_ratio = pca.explained_variance_ratio_
 importance_rank = np.argsort(explained_variance_ratio)[::-1]
 
 # Print the ranked variables
+pca_importance = []
 for i, var_index in enumerate(importance_rank[:10]):
+    pca_importance.append(X.columns[var_index])
     print(f"Rank {i+1}: Variable {X.columns[var_index]}")
+```
+
+### Random Forest
+
+Let's implement a random forest model to gather more insights about our data.
+
+Note that our data is imbalanced. We should use balanced class weights to mitigate this:
+
+```{python}
+leavers_frac = y.sum()/len(y)
+leavers_frac_pct = round(leavers_frac*100, 1)
+
+print(f"{leavers_frac_pct}% of the rows in our sample have a leaver value of 1")
+```
+
+```{python}
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+
+rf = RandomForestClassifier(n_estimators=100,
+                            class_weight='balanced',
+                            random_state=42)
+rf.fit(X_train, y_train)
+
+y_pred = rf.predict(X_test)
+accuracy = accuracy_score(y_test, y_pred)
+print("Accuracy:", accuracy)
+```
+
+Even when using the balanced class weights, our model predicts a low amount of leavers:
+
+```{python}
+pred_leavers_frac = y_pred.sum()/len(y_pred)
+pred_leavers_frac_pct = round(pred_leavers_frac*100, 1)
+
+print(f"{pred_leavers_frac_pct}% of training data was predicted to be leavers by the model")
+```
+
+Let's make a confusion matrix and compute some metrics:
+```{python}
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from sklearn.metrics import precision_score, recall_score, f1_score
+
+cm = confusion_matrix(y_test, y_pred)
+ConfusionMatrixDisplay(cm).plot()
+
+print('Recall:', recall_score(y_test, y_pred))
+print('Precision:', precision_score(y_test, y_pred))
+print('F1:', f1_score(y_test, y_pred))
+```  
+
+Precision is quite high, meaning that the vast majority of positive predictions were correct. Recall was just over 50%, which means the model was only able to identify classify a little over half of the leavers. Given the imbalance in the data, this isn't terrible
+
+Let's see which features this random forest assessed as most important. Just like we saw in PCA, income and age are the most important features, but this time income is ranked higher than age. Unlike what we saw in PCA, an industry and 5 occupations were among the most important features in this model.
+
+```{python}
+print(pd.Series(rf.feature_importances_, index=X.columns) \
+    .sort_values(ascending=False)[:10])
+```
+
+Let's start adding these importance rankings to a DataFrame we can use to compare the rankings from different models:
+
+```{python}
+importance_rankings = pd.DataFrame({
+    'Rank': list(range(1,11)),
+    'PCA': pca_importance,
+    'Random Forest': list(
+        pd.Series(rf.feature_importances_, index=X.columns) \
+        .sort_values(ascending=False)[:10].index),
+})
+importance_rankings
 ```
